@@ -1,0 +1,18 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Release" />
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="Create/Create.csproj" Id="b42bdb48-734f-4c3d-bec6-271904a78588">
+    <Platform Solution="Release|x64" Project="x64" />
+  </Project>
+  <Project Path="Delete/Delete.csproj" Id="c501cec7-3e64-4cac-8f5c-3291b93f5c00">
+    <Platform Solution="Release|x64" Project="x64" />
+  </Project>
+  <Project Path="list/List.csproj" Id="d134942d-b1dc-413a-b57e-b5e721c51345">
+    <Platform Solution="Release|x64" Project="x64" />
+  </Project>
+  <Project Path="Manager/Manager.csproj" Id="18dc5bad-5471-4a91-ba1b-3873c1420b4e">
+    <Platform Solution="Release|x64" Project="x64" />
+  </Project>
+</Solution>
