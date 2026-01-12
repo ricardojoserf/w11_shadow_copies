@@ -1,6 +1,6 @@
 # Windows 11 Shadow Copies
 
-On Windows 11, the built-in *vssadmin* can list, delete or resize Shadow Copies, but Microsoft removed the ability to create them. However, you can create them by interacting directly with the Volume Shadow Copy Service (VSS) API, which I already used in my other tool [SAMDump](https://github.com/ricardojoserf/samdump).
+On Windows 11, the built-in *vssadmin* can list, delete or resize Shadow Copies, but Microsoft removed the ability to create them. However, you can still do it by interacting directly with the Volume Shadow Copy Service (VSS) API, which I already used in my other tool [SAMDump](https://github.com/ricardojoserf/samdump).
 
 In this repo you can find stand-alone scripts to simply create, list or delete Shadow Copies, along with "manager" scripts which combine the three functionalities. By themselves, they should not be considered malicious by security solutions.
 
