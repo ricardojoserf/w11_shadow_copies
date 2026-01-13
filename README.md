@@ -6,8 +6,8 @@ In this repo you can find stand-alone scripts to simply create, list or delete S
 
 The scripts are implemeneted in C++, C# and Python, and should also work on other Windows versions.
 
------------------------------------------------------
 
+-----------------------------------------------------
 
 ## C++ and C# versions
 
@@ -15,6 +15,8 @@ Create Shadow Copies:
 
 ```
 Create.exe
+```
+```
 Manager.exe create
 ```
 
@@ -22,6 +24,8 @@ List Shadow Copies:
 
 ```
 List.exe
+```
+```
 Manager.exe list
 ```
 
@@ -29,6 +33,8 @@ Delete Shadow Copies:
 
 ```
 Delete.exe \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy12
+```
+```
 Manager.exe delete \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy12
 ```
 
@@ -42,6 +48,8 @@ Create Shadow Copies:
 
 ```
 python create.py
+```
+```
 python manager.py -o create
 ```
 
@@ -49,6 +57,8 @@ List Shadow Copies:
 
 ```
 python list.py
+```
+```
 python manager.py -o list
 ```
 
@@ -56,6 +66,8 @@ Delete Shadow Copies:
 
 ```
 python delete.py \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy12
+```
+```
 python manager.py -o delete -s \\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy12
 ```
 
