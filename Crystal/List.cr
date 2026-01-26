@@ -1,9 +1,9 @@
 require "uuid"
 
 VSS_CTX_BACKUP = 0
-VSS_CTX_ALL = -1_i32
+VSS_CTX_ALL = 0xffffffff_u32
 
-enum VssObjectType : Int32
+enum VssObjectType
   VSS_OBJECT_UNKNOWN = 0
   VSS_OBJECT_NONE = 1
   VSS_OBJECT_SNAPSHOT_SET = 2
@@ -61,6 +61,19 @@ lib VssLib
 
   struct IVssEnumObject
     vtbl : IVssEnumObjectVtbl*
+  end
+
+  struct IVssAsyncVtbl
+    query_interface : Proc(Void*, GUID*, Void**, Int32)
+    add_ref : Proc(Void*, UInt32)
+    release : Proc(Void*, UInt32)
+    cancel : Proc(Void*, Int32)
+    wait : Proc(Void*, UInt32, Int32)
+    query_status : Proc(Void*, Int32*, Int32*, Int32)
+  end
+
+  struct IVssAsync
+    vtbl : IVssAsyncVtbl*
   end
 
   struct IVssBackupComponentsVtbl
@@ -138,143 +151,267 @@ end
 
 COINIT_MULTITHREADED = 0x0_u32
 
-struct VssApi
-  getter create_func : Proc(Pointer(Pointer(VssLib::IVssBackupComponents)), Int32)
-  getter free_func : Proc(Pointer(VssLib::VssSnapshotProp), Nil)
-  
-  def initialize(@create_func, @free_func)
-  end
-  
-  def self.load : self?
-    dll_name = "VssApi.dll".to_utf16
-    handle = Kernel32.load_library(dll_name.to_unsafe)
-    return nil if handle.null?
-    
-    create_ptr = nil.as(Void*?)
-    ["CreateVssBackupComponentsInternal", "CreateVssBackupComponents", 
-     "?CreateVssBackupComponents@@YAJPEAPEAVIVssBackupComponents@@@Z"].each do |n|
-      ptr = Kernel32.get_proc_address(handle, n.to_unsafe)
-      unless ptr.null?
-        create_ptr = ptr
-        break
-      end
-    end
-    
-    return nil if create_ptr.nil? || create_ptr.null?
-    
-    free_ptr = Kernel32.get_proc_address(handle, "VssFreeSnapshotProperties".to_unsafe)
-    return nil if free_ptr.null?
-    
-    new(
-      Proc(Pointer(Pointer(VssLib::IVssBackupComponents)), Int32).new(create_ptr.not_nil!, Pointer(Void).null),
-      Proc(Pointer(VssLib::VssSnapshotProp), Nil).new(free_ptr, Pointer(Void).null)
-    )
-  end
+
+def is_administrator? : Bool
+  Shell32.is_user_an_admin != 0
 end
 
-@[AlwaysInline]
+
 def guid_to_string(guid : VssLib::GUID) : String
-  String.build(36) do |io|
-    io << guid.data1.to_s(16, precision: 8) << '-'
-    io << guid.data2.to_s(16, precision: 4) << '-'
-    io << guid.data3.to_s(16, precision: 4) << '-'
-    io << guid.data4[0].to_s(16, precision: 2) << guid.data4[1].to_s(16, precision: 2) << '-'
-    (2..7).each { |i| io << guid.data4[i].to_s(16, precision: 2) }
-  end
+  bytes = StaticArray(UInt8, 16).new(0)
+  bytes_ptr = bytes.to_unsafe.as(UInt32*)
+  bytes_ptr.value = guid.data1
+  (bytes_ptr + 1).as(UInt16*).value = guid.data2
+  (bytes_ptr + 1).as(UInt16*)[1] = guid.data3
+  8.times { |i| bytes[8 + i] = guid.data4[i] }
+  
+  uuid = UUID.new(bytes)
+  uuid.to_s
 end
 
-@[AlwaysInline]
+
 def wstring_to_string(ptr : UInt16*) : String
   return "" if ptr.null?
   
-  String.build do |io|
+  size = 0
+  temp = ptr
+  while temp.value != 0
+    size += 1
+    temp += 1
+  end
+  
+  String.build do |str|
     i = 0
-    loop do
+    while i < size
       char = ptr[i].to_i32
-      break if char == 0
       
-      if char >= 0xD800 && char <= 0xDBFF && ptr[i + 1] != 0
+      if char >= 0xD800 && char <= 0xDBFF && i + 1 < size
         low = ptr[i + 1].to_i32
         if low >= 0xDC00 && low <= 0xDFFF
-          io << (0x10000 + ((char - 0xD800) << 10) + (low - 0xDC00)).chr
+          codepoint = 0x10000 + ((char - 0xD800) << 10) + (low - 0xDC00)
+          str << codepoint.chr
           i += 2
           next
         end
       end
       
-      io << char.chr if char < 0xD800 || char > 0xDFFF
+      str << char.chr if char < 0xD800 || char > 0xDFFF
       i += 1
     end
   end
 end
 
 
-def list_shadow_copies : Nil
-  return puts "ERROR: Administrator privileges required" unless Shell32.is_user_an_admin != 0
+def create_null_guid : VssLib::GUID
+  VssLib::GUID.new(
+    data1: 0_u32,
+    data2: 0_u16,
+    data3: 0_u16,
+    data4: StaticArray(UInt8, 8).new(0_u8)
+  )
+end
+
+
+def load_create_vss_function : Proc(Pointer(Pointer(VssLib::IVssBackupComponents)), Int32)?
+  dll_name = "VssApi.dll".to_utf16
+  vss_handle = Kernel32.load_library(dll_name.to_unsafe)
   
-  hr = Ole32.co_initialize_ex(nil, COINIT_MULTITHREADED)
-  com_initialized = hr == 0 || hr == 1
-  return puts "Error initializing COM: 0x#{hr.to_s(16)}" if !com_initialized && hr != -2147417850
+  return nil if vss_handle.null?
   
-  api = VssApi.load
-  return puts "Error: Failed to load VssApi.dll" unless api
+  possible_names = [
+    "CreateVssBackupComponentsInternal",
+    "CreateVssBackupComponents",
+    "?CreateVssBackupComponents@@YAJPEAPEAVIVssBackupComponents@@@Z"
+  ]
+  
+  possible_names.each do |name|
+    func_ptr = Kernel32.get_proc_address(vss_handle, name.to_unsafe)
+    unless func_ptr.null?
+      return Proc(Pointer(Pointer(VssLib::IVssBackupComponents)), Int32).new(func_ptr, Pointer(Void).null)
+    end
+  end
+  
+  nil
+end
+
+
+def load_vss_free_function : Proc(Pointer(VssLib::VssSnapshotProp), Nil)?
+  dll_name = "VssApi.dll".to_utf16
+  vss_handle = Kernel32.load_library(dll_name.to_unsafe)
+  
+  return nil if vss_handle.null?
+  
+  func_ptr = Kernel32.get_proc_address(vss_handle, "VssFreeSnapshotProperties".to_unsafe)
+  return nil if func_ptr.null?
+  
+  Proc(Pointer(VssLib::VssSnapshotProp), Nil).new(func_ptr, Pointer(Void).null)
+end
+
+
+def list_shadow_copies
+  com_initialized = false
+  
+  begin
+    hr = Ole32.co_initialize_ex(nil, COINIT_MULTITHREADED)
+    if hr == 0 || hr == 1
+      com_initialized = true
+    elsif hr != -2147417850
+      puts "Error initializing COM. Error: 0x#{hr.to_s(16)}"
+      return
+    end
+  rescue ex
+    puts "Exception initializing COM: #{ex.message}"
+    return
+  end
+  
+  create_func = load_create_vss_function
+  unless create_func
+    puts "Error: Could not load CreateVssBackupComponents from VssApi.dll"
+    return
+  end
+  
+  free_func = load_vss_free_function
+  unless free_func
+    puts "Error: Could not load VssFreeSnapshotProperties from VssApi.dll"
+    return
+  end
   
   backup : VssLib::IVssBackupComponents* = Pointer(VssLib::IVssBackupComponents).null
   enum_obj : VssLib::IVssEnumObject* = Pointer(VssLib::IVssEnumObject).null
   
   begin
-    return puts "Error creating VSS components" if api.create_func.call(pointerof(backup)) != 0 || backup.null?
+    hr = create_func.call(pointerof(backup))
+    if hr != 0
+      puts "Error creating VSS components. HRESULT: 0x#{hr.to_s(16)}"
+      return
+    end
     
-    v = backup.value.vtbl.value
-    return puts "Error in InitializeForBackup" if v.initialize_for_backup.call(backup.as(Void*), Pointer(UInt16).null) != 0
+    if backup.null?
+      puts "Error: CreateVssBackupComponents returned NULL"
+      return
+    end
     
-    hr = v.set_context.call(backup.as(Void*), VSS_CTX_ALL)
-    return puts "Error in SetContext" if hr != 0 && v.set_context.call(backup.as(Void*), VSS_CTX_BACKUP) != 0
+    vtbl = backup.value.vtbl
+    hr = vtbl.value.initialize_for_backup.call(backup.as(Void*), Pointer(UInt16).null)
+    if hr != 0
+      puts "Error in InitializeForBackup. HRESULT: 0x#{hr.to_s(16)}"
+      case hr
+      when 0x80042302
+        puts "  -> VSS_E_UNEXPECTED: Unexpected VSS error"
+      when 0x8004230C
+        puts "  -> VSS_E_BAD_STATE: VSS in incorrect state"
+      when 0x80042308
+        puts "  -> VSS_E_VOLUME_NOT_SUPPORTED_BY_PROVIDER: Volume not supported"
+      end
+      return
+    end
     
-    guid_null = VssLib::GUID.new(data1: 0_u32, data2: 0_u16, data3: 0_u16, data4: StaticArray(UInt8, 8).new(0_u8))
+    vss_ctx_all_as_signed = VSS_CTX_ALL.unsafe_as(Int32)
+    hr = vtbl.value.set_context.call(backup.as(Void*), vss_ctx_all_as_signed)
+    if hr != 0
+      hr = vtbl.value.set_context.call(backup.as(Void*), VSS_CTX_BACKUP)
+      if hr != 0
+        puts "Error in SetContext. HRESULT: 0x#{hr.to_s(16)}"
+        return
+      end
+    end
     
-    hr = v.query.call(backup.as(Void*), pointerof(guid_null), VssObjectType::VSS_OBJECT_NONE.value,
-                      VssObjectType::VSS_OBJECT_SNAPSHOT.value, pointerof(enum_obj).as(Pointer(Pointer(Void))))
+    guid_null = create_null_guid
     
-    return puts "No shadow copies found on the system." if hr != 0 || enum_obj.null?
+    hr = vtbl.value.query.call(
+      backup.as(Void*),
+      pointerof(guid_null),
+      VssObjectType::VSS_OBJECT_NONE.value,
+      VssObjectType::VSS_OBJECT_SNAPSHOT.value,
+      pointerof(enum_obj).as(Pointer(Pointer(Void)))
+    )
     
-    ev = enum_obj.value.vtbl.value
+    if hr != 0 || enum_obj.null?
+      puts "No shadow copies found on the system."
+      return
+    end
+    
+    enum_vtbl = enum_obj.value.vtbl
     count = 0
     
     loop do
       prop = VssLib::VssObjectProp.new
       fetched = 0_u32
-      break if ev.next.call(enum_obj.as(Void*), 1_u32, pointerof(prop), pointerof(fetched)) != 0 || fetched == 0
       
-      next unless prop.type == VssObjectType::VSS_OBJECT_SNAPSHOT.value
+      hr = enum_vtbl.value.next.call(enum_obj.as(Void*), 1_u32, pointerof(prop), pointerof(fetched))
       
-      count += 1
-      snap = prop.obj.snap
+      break if hr != 0 || fetched == 0
       
-      puts "=" * 47, "Shadow Copy ##{count}", "=" * 47,
-           "ID: {#{guid_to_string(snap.snapshot_id)}}",
-           "Set ID: {#{guid_to_string(snap.snapshot_set_id)}}"
-      
-      puts "Device Object: #{wstring_to_string(snap.snapshot_device_object)}" unless snap.snapshot_device_object.null?
-      puts "Original Volume: #{wstring_to_string(snap.original_volume_name)}" unless snap.original_volume_name.null?
-      puts "Originating Machine: #{wstring_to_string(snap.originating_machine)}" unless snap.originating_machine.null?
-      
-      puts "Creation Date: #{Time.unix(snap.creation_timestamp // 10000000_i64 - 11644473600_i64)}",
-           "Attributes: 0x#{snap.snapshot_attributes.to_s(16).upcase}",
-           "Status: #{snap.status}",
-           "Provider ID: {#{guid_to_string(snap.provider_id)}}\n"
-      
-      api.free_func.call(pointerof(snap))
+      if prop.type == VssObjectType::VSS_OBJECT_SNAPSHOT.value
+        count += 1
+        puts "=" * 47
+        puts "Shadow Copy ##{count}"
+        puts "=" * 47
+        
+        snap = prop.obj.snap
+        
+        puts "ID: {#{guid_to_string(snap.snapshot_id)}}"
+        puts "Set ID: {#{guid_to_string(snap.snapshot_set_id)}}"
+        
+        unless snap.snapshot_device_object.null?
+          device = wstring_to_string(snap.snapshot_device_object)
+          puts "Device Object: #{device}"
+        end
+        
+        unless snap.original_volume_name.null?
+          volume = wstring_to_string(snap.original_volume_name)
+          puts "Original Volume: #{volume}"
+        end
+        
+        unless snap.originating_machine.null?
+          machine = wstring_to_string(snap.originating_machine)
+          puts "Originating Machine: #{machine}"
+        end
+        
+        timestamp_seconds = snap.creation_timestamp // 10000000_i64 - 11644473600_i64
+        timestamp = Time.unix(timestamp_seconds)
+        puts "Creation Date: #{timestamp}"
+        puts "Attributes: 0x#{snap.snapshot_attributes.to_s(16).upcase}"
+        puts "Status: #{snap.status}"
+        puts "Provider ID: {#{guid_to_string(snap.provider_id)}}"
+        puts
+        
+        free_func.call(pointerof(snap))
+      end
     end
     
-    puts count == 0 ? "No shadow copies found on the system." : "Total: #{count} shadow copies found"
+    if count == 0
+      puts "No shadow copies found on the system."
+    else
+      puts "Total: #{count} shadow copies found"
+    end
     
+  rescue ex
+    puts "Error: #{ex.message}"
+    puts ex.backtrace.join("\n")
   ensure
-    ev.release.call(enum_obj.as(Void*)) if enum_obj && (ev = enum_obj.value.vtbl.value)
-    v.release.call(backup.as(Void*)) if backup && (v = backup.value.vtbl.value)
+    unless enum_obj.null?
+      enum_vtbl = enum_obj.value.vtbl
+      enum_vtbl.value.release.call(enum_obj.as(Void*))
+    end
+    
+    unless backup.null?
+      vtbl = backup.value.vtbl
+      vtbl.value.release.call(backup.as(Void*))
+    end
+    
     Ole32.co_uninitialize if com_initialized
   end
 end
 
 
-list_shadow_copies
+def main
+  unless is_administrator?
+    puts "ERROR: This program requires administrator privileges."
+    return
+  end
+  
+  list_shadow_copies
+end
+
+main
