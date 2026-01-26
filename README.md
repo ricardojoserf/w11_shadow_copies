@@ -4,12 +4,12 @@ On Windows 11, the built-in *vssadmin* can list, delete or resize Shadow Copies,
 
 In this repo you can find stand-alone scripts to simply create, list or delete Shadow Copies, along with "manager" scripts which combine the three functionalities. By themselves, they should not be considered malicious by security solutions.
 
-The scripts are implemeneted in C++, C# and Python, and should also work on other Windows versions.
+The scripts are implemeneted in C#, C++, Crystal Python, and should also work on other Windows versions.
 
 
 -----------------------------------------------------
 
-## C++ and C# versions
+## C#, C++ and Crystal versions
 
 Create Shadow Copies:
 
